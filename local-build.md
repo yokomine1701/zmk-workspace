@@ -27,6 +27,10 @@ zmk-workspace/                               ← ビルド環境（このリポ�
 
 キーマップを変えたいときは config 側、ビルドが通らないときは workspace 側を触る。
 
+config 側には 2 系統のブランチがある。素の ZMK で動かす `main` と、cormoran 氏のフォークで
+DYA Studio から設定をランタイム変更できる `feat/runtime-combo`（`DYA-Studio` 派生）。
+詳細は「8. DYA Studio ブランチ」。
+
 ## 2. 前提
 
 | ルート | 必要なもの | 備考 |
@@ -215,7 +219,151 @@ WSL では PowerShell 経由で `flash.ps1` が走る。挙動は次の通り。
 
 固定するとローカル・GitHub Actions・keymap editor のすべてで同じ版が使われる。
 
-## 8. トラブルシューティング
+## 8. DYA Studio ブランチ（cormoran フォーク）
+
+### DYA とは
+
+cormoran 氏の ZMK フォークと、非公式のカスタム Studio RPC に対応したモジュール群。
+専用 UI が [dya-studio](https://github.com/cormoran/dya-studio)。
+素の ZMK Studio が触れない領域（トラックボール感度、エンコーダ、BLE 管理、コンボ、マクロ）を
+**書き込みなしでランタイム変更できる**のが利点。
+
+### ブランチと世代
+
+| ブランチ | zmk | Zephyr | 用途 |
+|---|---|---|---|
+| `main` | `zmkfirmware/zmk` `main` | 4.1 | 素の ZMK。ローカル / AI によるキーマップ編集が主 |
+| `feat/runtime-combo`（`DYA-Studio` 派生） | `cormoran/zmk` `main+dya` | 4.1 | DYA Studio 用 |
+
+- 旧 `DYA-Studio` ブランチは `v0.3-branch+dya`（Zephyr 3.5）だった。コンボ / マクロのモジュールは
+  **main 系にしかブランチが無い**（`zmk-v0.3.0.0` 系が存在しない）ため `main+dya` へ移行した。
+- `main+dya` の Zephyr 要求は `v4.1.0+zmk-fixes` で、素の ZMK main と同じ。**`flake.nix` は共通で使える。**
+- ブランチを切り替えたら `just update` が必要（`zmk/` ツリーが入れ替わるため数分かかる）。
+
+### カスタム RPC には専用の Kconfig がまとめて必要（重要）
+
+**モジュールを west.yml に追加して `CONFIG_ZMK_...=y` にするだけでは足りない。**
+これが無いと DYA Studio に画面は出るが、開いた瞬間に無応答・切断になり、最悪 USB デバイスとして
+認識されなくなって再書き込みが必要になる。原因は低優先度ワークキューのスタックオーバーフロー。
+
+右手側（セントラル）:
+
+```ini
+CONFIG_ZMK_LOW_PRIORITY_THREAD_STACK_SIZE=4096
+CONFIG_SYSTEM_WORKQUEUE_STACK_SIZE=4096
+CONFIG_ZMK_STUDIO_RPC_THREAD_STACK_SIZE=6000
+CONFIG_ZMK_STUDIO_RPC_RX_BUF_SIZE=256
+CONFIG_ZMK_STUDIO_RPC_TX_BUF_SIZE=256
+CONFIG_ZMK_STUDIO_RPC_CUSTOM_SUBSYSTEM_REQUEST_PAYLOAD_MAX_BYTES=256
+CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN=240
+CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE=256
+# behavior 束縛を ID で永続化するため、安定ハッシュが必要
+CONFIG_ZMK_BEHAVIOR_LOCAL_ID_TYPE_CRC16=y
+```
+
+左手側（ペリフェラル）にも必要:
+
+```ini
+CONFIG_ZMK_CUSTOM_SETTINGS=y
+CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY=y
+CONFIG_ZMK_LOW_PRIORITY_THREAD_STACK_SIZE=2048
+CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN=240
+```
+
+`SPLIT_RELAY_EVENT_DATA_LEN` は**左右で値が一致していないとリレーが成立しない**。
+右手側の RAM 使用量はこれらを入れて 71.6%（256KB 中 187KB）。
+
+### モジュールを追加するときの手本
+
+1. [cormoran/zmk-keyboard-dya2](https://github.com/cormoran/zmk-keyboard-dya2) の
+   `config/west-dependency.yml` と `boards/shields/dya2/dya2_{right,left}.conf`。
+   これが DYA フルスタックの正解例で、最も信頼できる。
+   特に dya2_right.conf 末尾の「Adjustment for Custom RPC Protocol & Split Relay support」ブロック。
+2. 各モジュールの README に必須 Kconfig が明記されている。
+3. 対応する ZMK ベースは [cormoran/zmk の wiki](https://github.com/cormoran/zmk/wiki/Available-Custom-Studio-RPC-aware-Branches) を見る。
+
+### コンボ
+
+既定値はキーマップの `runtime_combo_defaults` ノードで与える（`zmk,combos` ではない）。
+
+```dts
+/ {
+    runtime_combo_defaults {
+        compatible = "cormoran,runtime-combo-defaults";
+
+        combo_esc_qw {
+            key-positions = <0 1>;      // Q + W
+            bindings = <&kp ESC>;
+            display-name = "Esc (QW)";
+            // 省略可: layers / timeout-ms / require-prior-idle-ms / slow-release / slot
+        };
+    };
+};
+```
+
+**値の優先順位:**
+
+1. **ランタイムの保存値** — 書き込み済み、または `Enabled` を off にした枠。常に勝つ
+2. **キーマップの既定値**
+3. 空
+
+焼いた直後に既定コンボが効かない場合は、1 の保存値が残って既定値を抑制している。
+設定リセット（DYA Studio の reset settings か `settings_reset` を焼く）で解消する。
+
+**`Delete` と `Enabled` off の違い**（よく混乱する）:
+
+| 操作 | 結果 |
+|---|---|
+| `Delete` → `Save` | 消すのは**ランタイムの保存値だけ**。既定値のある枠は既定値が復活する（＝実質リセット） |
+| `Enabled` を off → `Save` | 「明示的に無効」が保存され、既定値を抑制する。**キーマップを触らずに消せる** |
+| キーマップから該当ノードを削除して再ビルド | 既定値自体が無くなる。恒久的 |
+
+自分で空き枠に追加したコンボ（既定値の無い枠）は `Delete` で消える。
+`Delete` に確認ダイアログは無く、変更は toolbar の `Save` まで flash に書かれない。
+
+**zonkey のキー位置番号**（コンボ指定に使う。他のキーボードから移植する際は読み替えが必要）:
+
+```
+ 0  1  2  3  4              5  6  7  8  9
+10 11 12 13 14 15      16 17 18 19 20 21
+22 23 24 25 26 27      28 29 30 31 32 33
+34 35 36 37 38 39         40 41        42
+```
+
+### トラックボールとエンコーダ
+
+`zonkey_R.overlay` の構成:
+
+```dts
+&trackball_listener {
+    input-processors = <&mouse_runtime_input_processor>;   // 通常はマウス移動
+    scroller {
+        layers = <5>;                                      // レイヤー5 の時だけ
+        input-processors = <&zip_xy_to_scroll_mapper &scroll_runtime_input_processor>;
+    };
+};
+```
+
+| 操作 | 動作 |
+|---|---|
+| `V`（3段目）= `&lt 5 V` を押しながらボール | **スクロール** |
+| `C`（3段目）= `&lt 6 C` | マウスレイヤー（J/K/L が左/中/右クリック） |
+| ボールを動かす | `mouse_runtime_input_processor` が自動でマウスレイヤーへ切替 |
+| エンコーダ | `&rsr_pg` / `&rsr_vol`（`zmk-behavior-runtime-sensor-rotate`） |
+
+- **スクロールするレイヤーを変える** → `scroller { layers = <5>; }` を書き換える（`<5 6>` のように複数可）
+- **常時スクロール** → `scroller` を使わず `input-processors` に `&zip_xy_to_scroll_mapper` を入れる
+- **感度・方向** → `*_runtime_input_processor` がチェーンに入っているので **DYA Studio からランタイム調整**できる
+  （v0.3 系では `zip_scroll_scaler 2 5` 固定だった）
+
+### 既知の制約
+
+- **BLE では DYA Studio に繋がらない**（素の ZMK Studio でも同様）。USB 接続を使う。
+  右手側に `studio-rpc-usb-uart` スニペットが付いているので USB シリアルで繋がる。
+- ZMK の世代を跨いで焼いた直後はペアリングが不安定になることがある。
+  左右に `settings_reset` を焼いてから本体ファームを焼くと確実（BLE 再ペアリングが必要）。
+
+## 9. トラブルシューティング
 
 実際に遭遇したエラーと対処。
 
@@ -244,6 +392,33 @@ grpcio-tools を優先して使う）。Dev Container では公式イメージ�
 旧 `urob/zephyr-nix` は Zephyr 4.1 の requirements を解決できない。
 現在の上流である `github:nix-community/zephyr-nix` を使う（`flake.nix` で対応済み）。
 
+### `CONFIG_EC11` was assigned the value 'y' but got the value 'n'
+
+devicetree と矛盾している。zonkey のエンコーダ節点は**左手側のみ**で、
+`zonkey.dtsi` の `right_encoder` は `status = "disabled"` のため
+右手側では `DT_HAS_ALPS_EC11_ENABLED=n` になる。
+右手側の conf から `CONFIG_EC11` / `CONFIG_EC11_TRIGGER_GLOBAL_THREAD` を外す。
+
+Zephyr 3.5 ではこの種の不一致は警告だったが、**4.1 では Kconfig エラーで停止する**。
+v0.3 系から main 系へ上げたときに出やすい。
+
+### `CONFIG_BT_HCI_TX_STACK_SIZE` was assigned the value '1536' but got '1024'
+
+Zephyr 4.1 のこの symbol には prompt が無く、そのままでは上書きできない。
+先に `CONFIG_BT_HCI_TX_STACK_SIZE_WITH_PROMPT=y` を立てる。
+なお dya2 リファレンスはこの値を設定していない（main 系では既定の 1024 で足りている）。
+
+### DYA Studio でコンボ / マクロの画面を開くと無応答・切断になる
+
+カスタム RPC 用の Kconfig が足りない。「8. DYA Studio ブランチ」の
+必須 Kconfig を参照。設定一覧の取得は低優先度ワークキューで通知本体をエンコードするため、
+既定のスタックではオーバーフローする。
+
+### DYA Studio でコンボを削除しても復活する
+
+仕様どおりの挙動。`Delete` はランタイムの保存値だけを消すため、キーマップに既定値がある枠は
+既定値が顔を出す。「8. DYA Studio ブランチ」の `Delete` と `Enabled` の表を参照。
+
 ### ビルドして焼いたのにキーマップが変わらない
 
 ZMK Studio で保存した内容が本体の settings 領域に残っており、ファーム内のキーマップより優先されている。
@@ -257,7 +432,7 @@ Studio 上で stock キーマップに戻すか、`settings_reset` を焼く（�
 
 ワークスペースが `/mnt/c/` 配下にある。WSL ネイティブ領域に移す。
 
-## 9. 本家の更新を取り込む
+## 10. 本家の更新を取り込む
 
 ```bash
 git fetch upstream
@@ -266,10 +441,18 @@ git merge upstream/main
 
 `flake.nix` は本家と差分があるので、競合したら上の「バージョン固定の方針」の表を見て解決する。
 
-## 10. その他のメモ
+## 11. その他のメモ
 
 - シールドのディレクトリ名は `config/boards/shields/zonkey `（**末尾に半角スペース**）。
   ビルドには影響しないが、将来トラブルの種になり得る。
 - `config/west.yml` のモジュールは `path:` 未指定のため、west がワークスペース直下に clone する
   （`zmk-pmw3610-driver` など）。`.gitignore` 済み。
 - キーマップの編集・反映の手順は「5. キーマップ変更のワークフロー」にまとめてある。
+- DYA ブランチのビルドで出る既知の上流警告: `zmk-module-runtime-input-processor` が
+  修飾キーの HID usage（`0x700E0`〜`0x700E7`）を 16 bit 配列に入れているため
+  `temp_layer_keep_keycodes` で切り詰めが起きる（`-Woverflow`）。下位 16 bit だけで
+  比較していれば実害はないが、トラックボール操作中に修飾キーを押している間レイヤーを
+  保持する機能が効かない可能性がある。こちらの設定ではなくモジュール側の問題。
+- 他のキーボードからキーマップを移植する場合、レイヤーの `bindings` は見た目どおりの並びなので
+  素直に移せるが、**コンボはキー位置番号で指定するため読み替えが必要**。
+  番号表は「8. DYA Studio ブランチ」のコンボの項にある。
