@@ -10,3 +10,6 @@ draw/base.yaml
 config/zmk-config-*
 config/*-zmk-config
 !config/.gitkeep
+zmk-pmw3610-driver
+zmk-rgbled-widget
+zmk-feature-non-lipo-battery-management
