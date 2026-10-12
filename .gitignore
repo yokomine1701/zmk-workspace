@@ -10,6 +10,10 @@ draw/base.yaml
 config/zmk-config-*
 config/*-zmk-config
 !config/.gitkeep
-zmk-pmw3610-driver
-zmk-rgbled-widget
-zmk-feature-non-lipo-battery-management
+# west は path 未指定のプロジェクトをワークスペース直下に clone する
+/zmk-behavior-*
+/zmk-driver-*
+/zmk-feature-*
+/zmk-module-*
+/zmk-pmw3610-driver
+/zmk-rgbled-widget
