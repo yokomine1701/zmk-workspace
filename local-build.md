@@ -91,7 +91,75 @@ just clean-all            # .west と zmk も削除（init のやり直し）
 
 成果物は `firmware/zmk-config-zonkey-3DPencoder-DYA/<ターゲット>.uf2`。
 
-## 5. 書き込み
+## 5. キーマップ変更のワークフロー
+
+編集経路が 3 つあるため、**正本（source of truth）をどれにするか決めておく**こと。
+基本は「config リポジトリの `config/zonkey.keymap` を正本にする」。
+
+| 経路 | 反映のさせ方 | 向いている用途 |
+|---|---|---|
+| ローカル編集（Claude への指示を含む） | ビルド → 書き込み → commit & push | 複雑な変更（マクロ、コンボ、behavior、JP 記号定義） |
+| keymap editor | GitHub に直接コミット → ローカルで pull → ビルド | 単純なキー差し替え |
+| ZMK Studio | USB 接続して即反映（ビルド不要） | 実機で触りながら試行錯誤 |
+
+### ローカルで変更する場合
+
+```bash
+cd ~/develop/zmk_dev/zmk-workspace
+git -C config/zmk-config-zonkey-3DPencoder-DYA pull   # 必ず最初に
+# キーマップを編集
+just draw                                             # SVG で目視確認
+just build zonkey                                     # L と R を両方ビルド
+just flash zonkey_R -r                                # 右がセントラル
+git -C config/zmk-config-zonkey-3DPencoder-DYA commit -am "keymap: ..."
+git -C config/zmk-config-zonkey-3DPencoder-DYA push   # keymap editor に反映させるため
+```
+
+### keymap editor で変更した場合
+
+```bash
+git -C config/zmk-config-zonkey-3DPencoder-DYA pull
+just build zonkey
+just flash zonkey_R -r
+```
+
+### 衝突を避ける 3 つのルール
+
+1. **ローカルで触る前に必ず `pull`**。keymap editor は GitHub 上のファイルを直接書き換えるため、
+   知らないうちに origin が進んでいる。
+2. **ローカルで変えたら必ず `push`**。push しないまま editor を開くと、editor は古い版を元に
+   編集して上書きコミットする。
+3. **同時に両方を触らない**。片方で編集中はもう片方を開かない。
+
+### キーマップ変更なら右側だけ焼けばよい
+
+`config/boards/shields/zonkey /Kconfig.defconfig` で `ZMK_SPLIT_ROLE_CENTRAL` が R 側に設定されており、
+キーマップはセントラル（右）が保持する。左は押されたキー位置を送るだけなので、キーマップだけの変更なら
+`just flash zonkey_R -r` で足りる。
+
+ただし **ZMK 本体のバージョンを上げたときは左右両方を焼く**。左右でプロトコルが食い違うと
+ペアリングが不安定になる。
+
+なお `just flash` はマッチした最初の 1 ターゲットしか焼かないので `zonkey_R` / `zonkey_L` と明示する
+（`just build` は部分一致した全ターゲットをビルドする）。
+
+### SVG はローカルでコミットしない
+
+config リポジトリの `.github/workflows/draw-keymap.yml` が、`config/*` への push をトリガーに
+**GitHub Actions 側で SVG を自動生成してコミットする**。ローカルの `just draw` 結果もコミットすると
+bot のコミットと競合する。`just draw` は書き込み前の目視確認用と割り切り、push 後に `git pull` で
+bot のコミットを取り込む。
+
+### ZMK Studio を使う場合の注意
+
+`CONFIG_ZMK_STUDIO=y`（`CONFIG_ZMK_STUDIO_LOCKING=n`）なので、右側は USB 接続で ZMK Studio から
+キーマップを即変更できる。ただし **Studio で保存した内容は本体の settings 領域に残り、
+新しいファームを焼いても優先される**（uf2 の書き込みでは settings は消去されない）。
+
+Studio を使うなら「実機で試す → 気に入ったらファイルにも反映して commit」とし、
+ファイル側を正本に保つ運用にする。
+
+## 6. 書き込み
 
 ```bash
 just flash zonkey_L
@@ -106,7 +174,7 @@ WSL では PowerShell 経由で `flash.ps1` が走る。挙動は次の通り。
 つまり**先にコマンドを実行してから**キーボードをブートローダーモード（リセットボタン 2 回押し）にしてもよい。
 左右は別ターゲットなので、それぞれ実行する。手動でやるなら `firmware/` の uf2 をエクスプローラでドライブにコピーしても同じ。
 
-## 6. バージョン固定の方針（重要）
+## 7. バージョン固定の方針（重要）
 
 ビルドが突然壊れる原因はほぼすべて「ZMK 本体の版」と「ツールチェーンの版」の不一致。
 対応関係は次の通りで、**ZMK を更新したら Zephyr と SDK も合わせる**必要がある。
@@ -147,7 +215,7 @@ WSL では PowerShell 経由で `flash.ps1` が走る。挙動は次の通り。
 
 固定するとローカル・GitHub Actions・keymap editor のすべてで同じ版が使われる。
 
-## 7. トラブルシューティング
+## 8. トラブルシューティング
 
 実際に遭遇したエラーと対処。
 
@@ -176,6 +244,11 @@ grpcio-tools を優先して使う）。Dev Container では公式イメージ�
 旧 `urob/zephyr-nix` は Zephyr 4.1 の requirements を解決できない。
 現在の上流である `github:nix-community/zephyr-nix` を使う（`flake.nix` で対応済み）。
 
+### ビルドして焼いたのにキーマップが変わらない
+
+ZMK Studio で保存した内容が本体の settings 領域に残っており、ファーム内のキーマップより優先されている。
+Studio 上で stock キーマップに戻すか、`settings_reset` を焼く（「5. キーマップ変更のワークフロー」参照）。
+
 ### `No matching targets found`
 
 `just build` の引数が `build.yaml` のどのターゲットにも部分一致していない。`just list` で確認する。
@@ -184,7 +257,7 @@ grpcio-tools を優先して使う）。Dev Container では公式イメージ�
 
 ワークスペースが `/mnt/c/` 配下にある。WSL ネイティブ領域に移す。
 
-## 8. 本家の更新を取り込む
+## 9. 本家の更新を取り込む
 
 ```bash
 git fetch upstream
@@ -193,12 +266,10 @@ git merge upstream/main
 
 `flake.nix` は本家と差分があるので、競合したら上の「バージョン固定の方針」の表を見て解決する。
 
-## 9. その他のメモ
+## 10. その他のメモ
 
 - シールドのディレクトリ名は `config/boards/shields/zonkey `（**末尾に半角スペース**）。
   ビルドには影響しないが、将来トラブルの種になり得る。
 - `config/west.yml` のモジュールは `path:` 未指定のため、west がワークスペース直下に clone する
   （`zmk-pmw3610-driver` など）。`.gitignore` 済み。
-- keymap editor は GitHub 上の config を直接コミットする。ローカルで触る前に
-  `git -C config/zmk-config-zonkey-3DPencoder-DYA pull` を忘れないこと。
-- `just draw` は config 側の `keymap-drawer/zonkey.svg` を上書きする。
+- キーマップの編集・反映の手順は「5. キーマップ変更のワークフロー」にまとめてある。
